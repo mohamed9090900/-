@@ -5,7 +5,7 @@
   const DB_VERSION = 1;
   const STORE = 'kv';
   const STATE_KEY = 'state';
-  const APP_VERSION = 4;
+  const APP_VERSION = 5;
   const main = document.getElementById('appMain');
   const modal = document.getElementById('modal');
   const backupFile = document.getElementById('backupFile');
@@ -23,8 +23,8 @@
   const esc = s => String(s ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
   const fmt = (v,c='ج') => `${new Intl.NumberFormat('ar-EG',{maximumFractionDigits:2}).format(n(v))} ${esc(c)}`;
   const fmtNum = v => new Intl.NumberFormat('ar-EG',{maximumFractionDigits:2}).format(n(v));
-  const periodLabel = p => p === 'monthly' ? 'شهري' : p === 'annual' ? 'سنوي' : 'تأسيس';
-  const tagClass = p => p === 'monthly' ? 'monthly' : p === 'annual' ? 'annual' : '';
+  const periodLabel = p => p === 'monthly' ? 'شهري' : 'تأسيس';
+  const tagClass = p => p === 'monthly' ? 'monthly' : '';
   const statusLabel = s => s === 'replace' ? 'محتاج بديل' : s === 'research' ? 'قيد المقارنة' : 'مؤكد';
   const statusClass = s => s === 'replace' ? 'replace' : s === 'research' ? 'research' : 'confirmed';
 
@@ -62,6 +62,7 @@
       contingencyPct: Number.isFinite(Number(p.contingencyPct)) ? clamp(p.contingencyPct,0,100) : 10,
       weakScenarioPct: Number.isFinite(Number(p.weakScenarioPct)) ? clamp(p.weakScenarioPct,0,300) : 70,
       strongScenarioPct: Number.isFinite(Number(p.strongScenarioPct)) ? clamp(p.strongScenarioPct,0,300) : 130,
+      grossMarginPct: Number.isFinite(Number(p.grossMarginPct)) ? clamp(p.grossMarginPct,0,100) : 0,
       revenues: Array.isArray(p.revenues) ? p.revenues : [],
       currency: p.currency || 'ج',
       createdAt:p.createdAt||now(), updatedAt:p.updatedAt||now()
@@ -84,6 +85,7 @@
           for(const it of c.items){
             it.notes=it.notes||''; it.supplier=it.supplier||''; it.status=it.status||'confirmed'; it.updatedAt=it.updatedAt||p.updatedAt||now();
             it.qty=Math.max(0,n(it.qty)); it.unitPrice=Math.max(0,n(it.unitPrice));
+            if(it.period==='annual') it.period='startup';
             if(Number.isFinite(Number(it.salePrice))) it.salePrice=Math.max(0,n(it.salePrice));
           }
         }
@@ -134,8 +136,8 @@
 
   function calcItems(items=[]){
     const r={startup:0,monthly:0,annual:0,count:0};
-    for(const it of items){ const total=n(it.qty)*n(it.unitPrice); r[it.period || 'startup'] += total; r.count++; }
-    r.firstYear=r.startup+(r.monthly*12)+r.annual; return r;
+    for(const it of items){ const total=n(it.qty)*n(it.unitPrice); const period=it.period==='monthly'?'monthly':'startup'; r[period] += total; r.count++; }
+    r.firstYear=r.startup+(r.monthly*12); return r;
   }
   function calcCategory(cat,kind='generic'){
     if(kind==='goods'){
@@ -160,7 +162,7 @@
       r.startup+=x.startup||0; r.monthly+=x.monthly||0; r.annual+=x.annual||0; r.count+=x.count||0;
       r.purchase+=x.purchase||0; r.sales+=x.sales||0; r.profit+=x.profit||0;
     }
-    r.firstYear=r.startup+(r.monthly*12)+r.annual; return r;
+    r.firstYear=r.startup+(r.monthly*12); return r;
   }
   function calcProject(p){
     const r={startup:0,monthly:0,annual:0,count:0,sections:p.sections.length,categories:0};
@@ -168,7 +170,7 @@
       const x=calcSection(sec);
       r.startup+=x.startup; r.monthly+=x.monthly; r.annual+=x.annual; r.count+=x.count; r.categories+=(sec.categories||[]).length;
     }
-    r.firstYear=r.startup+(r.monthly*12)+r.annual;
+    r.firstYear=r.startup+(r.monthly*12);
     r.reserveMonths=clamp(p.reserveMonths ?? 3,0,24);
     r.contingencyPct=clamp(p.contingencyPct ?? 10,0,100);
     r.operatingReserve=r.monthly*r.reserveMonths;
@@ -184,10 +186,12 @@
     }
     return out;
   }
-  function calcSimpleProfit(p,c=calcProject(p)){
-    const goods=calcGoods(p);
-    const monthlyExpenses=c.monthly;
-    return {...goods,monthlyExpenses,netProfit:goods.profit-monthlyExpenses};
+  function calcBreakEven(p,c=calcProject(p)){
+    const monthlyExpenses=Math.max(0,n(c.monthly));
+    const grossMarginPct=clamp(p.grossMarginPct ?? 0,0,100);
+    const margin=grossMarginPct/100;
+    const breakEvenSales=monthlyExpenses===0 ? 0 : margin>0 ? monthlyExpenses/margin : null;
+    return {monthlyExpenses,grossMarginPct,breakEvenSales};
   }
 
   function calcRevenueSource(src,factor=1){
@@ -212,7 +216,7 @@
   function calcScenario(p,c,pct=100){
     const factor=clamp(pct,0,300)/100;
     const rev=calcRevenues(p,factor);
-    const fixedMonthly=c.monthly+(c.annual/12);
+    const fixedMonthly=c.monthly;
     const grossMargin=rev.revenue>0?rev.contribution/rev.revenue:0;
     const netProfit=rev.contribution-fixedMonthly;
     const netMargin=rev.revenue>0?netProfit/rev.revenue:0;
@@ -225,13 +229,13 @@
 
   function renderHome(){
     const cards=state.projects.map(p=>{
-      const c=calcProject(p), simple=calcSimpleProfit(p,c); const cover=p.images?.[0]?.data;
+      const c=calcProject(p); const cover=p.images?.[0]?.data;
       return `<article class="card project-card" data-action="open-project" data-id="${p.id}">
         <div class="project-cover">${cover?`<img src="${cover}" alt="">`:''}<span class="badge">${c.sections} أقسام • ${c.count} عناصر</span></div>
         <div class="project-card-body">
           <div class="meta">${esc(p.location || 'بدون مكان محدد')}${p.area ? ` • ${esc(p.area)}` : ''}</div>
           <h2 class="project-title">${esc(p.name)}</h2>
-          <div class="project-total"><div><div class="caption">رأس المال المطلوب للبدء</div><div class="big-number">${fmt(c.openingCapital,p.currency)}</div><div class="caption">يشمل احتياطي تشغيل ${c.reserveMonths} شهر + طوارئ ${fmtNum(c.contingencyPct)}%${simple.count?` • صافي ربح متوقع ${fmt(simple.netProfit,p.currency)}`:''}</div></div><span class="btn small">فتح</span></div>
+          <div class="project-total"><div><div class="caption">رأس المال المطلوب للبدء</div><div class="big-number">${fmt(c.openingCapital,p.currency)}</div><div class="caption">يشمل احتياطي تشغيل ${c.reserveMonths} شهر + طوارئ ${fmtNum(c.contingencyPct)}% • مصروف شهري ${fmt(c.monthly,p.currency)}</div></div><span class="btn small">فتح</span></div>
         </div>
       </article>`;
     }).join('');
@@ -262,14 +266,12 @@
       </section>
 
       <div class="stats">
-        <div class="card stat"><div class="label">تكاليف التأسيس</div><div class="value">${fmt(c.startup,p.currency)}</div><div class="sub">مصاريف تدفع مرة واحدة قبل/وقت الافتتاح</div></div>
-        <div class="card stat"><div class="label">تشغيل شهري</div><div class="value">${fmt(c.monthly,p.currency)}</div><div class="sub">إيجار، مرتبات، خدمات… حسب إدخالك</div></div>
-        <div class="card stat"><div class="label">مصروفات سنوية</div><div class="value">${fmt(c.annual,p.currency)}</div><div class="sub">بنود تتكرر مرة كل سنة</div></div>
-        <div class="card stat"><div class="label">إنفاق السنة الأولى</div><div class="value">${fmt(c.firstYear,p.currency)}</div><div class="sub">للمعلومة فقط، وليس هو المبلغ المطلوب يوم الافتتاح</div></div>
+        <div class="card stat"><div class="label">تكاليف التأسيس</div><div class="value">${fmt(c.startup,p.currency)}</div><div class="sub">كل ما ستدفعه مرة واحدة قبل أو وقت الافتتاح</div></div>
+        <div class="card stat"><div class="label">المصروفات الشهرية</div><div class="value">${fmt(c.monthly,p.currency)}</div><div class="sub">إيجار، مرتبات، كهرباء، خدمات وباقي التشغيل الشهري</div></div>
       </div>
       <div class="info-strip"><span>💡</span><div><b>احتياطي التشغيل والطوارئ قابلين للتعديل.</b> الاحتياطي مش مصروف فعلي؛ هو سيولة تحميك في بداية التشغيل. عدّل عدد الشهور ونسبة الطوارئ من «إعدادات الدراسة» حسب طبيعة المشروع.</div></div>
 
-      ${renderSimpleProfit(p,c)}
+      ${renderBreakEven(p,c)}
 
       <div class="card photos-box"><div class="photos-box-head"><h3>صور ومراجع المشروع</h3><div class="spacer"></div><button class="btn small" data-action="add-project-photo">+ إضافة صورة</button></div><div class="photos">${photos || '<span class="meta">أضف صور المكان، أفكار التصميم، عروض أسعار أو أي مرجع بصري يساعدك.</span>'}</div><input id="projectPhotoInput" class="file-hidden" type="file" accept="image/*"></div>
 
@@ -284,9 +286,9 @@
     const cs=calcSection(s);
     const cats=s.categories.map(cat=>renderCategory(p,s,cat)).join('');
     let metrics='';
-    if(s.kind==='goods') metrics=`<div class="metric-line">شراء <b>${fmt(cs.purchase,p.currency)}</b></div><div class="metric-line">بيع <b>${fmt(cs.sales,p.currency)}</b></div><div class="metric-line">ربح <b>${fmt(cs.profit,p.currency)}</b></div>`;
+    if(s.kind==='goods') metrics=`<div class="metric-line">تكلفة البضاعة <b>${fmt(cs.purchase,p.currency)}</b></div>`;
     else if(s.kind==='monthly_expenses') metrics=`<div class="metric-line">إجمالي شهري <b>${fmt(cs.monthly,p.currency)}</b></div>`;
-    else metrics=`<div class="metric-line">تأسيس <b>${fmt(cs.startup,p.currency)}</b></div><div class="metric-line">شهري <b>${fmt(cs.monthly,p.currency)}</b></div><div class="metric-line">أول سنة <b>${fmt(cs.firstYear,p.currency)}</b></div>`;
+    else metrics=`<div class="metric-line">تأسيس <b>${fmt(cs.startup,p.currency)}</b></div><div class="metric-line">شهري <b>${fmt(cs.monthly,p.currency)}</b></div>`;
     const fixed=s.kind==='goods'||s.kind==='monthly_expenses';
     return `<section class="card section-block" data-section-search="${esc(`${s.name} ${s.notes||''}`.toLowerCase())}">
       <div class="section-header">
@@ -305,11 +307,11 @@
     let rows='', table='';
     if(kind==='goods'){
       rows=cat.items.map(it=>{
-        const qty=Math.max(0,n(it.qty)), purchase=qty*Math.max(0,n(it.unitPrice)), sales=qty*Math.max(0,n(it.salePrice)), profit=sales-purchase;
+        const qty=Math.max(0,n(it.qty)), purchase=qty*Math.max(0,n(it.unitPrice));
         const searchText=`${it.name} ${it.supplier||''} ${it.notes||''}`.toLowerCase();
-        return `<tr data-item-search="${esc(searchText)}"><td data-label="الصنف"><div class="item-name">${it.image?`<img class="thumb" src="${it.image}" alt="">`:''}<span>${esc(it.name)}</span></div></td><td data-label="الكمية">${fmtNum(qty)} ${esc(it.unit||'')}</td><td data-label="سعر الشراء">${fmt(it.unitPrice,p.currency)}</td><td data-label="سعر البيع">${fmt(it.salePrice,p.currency)}</td><td data-label="إجمالي الشراء"><b>${fmt(purchase,p.currency)}</b></td><td data-label="إجمالي البيع"><b>${fmt(sales,p.currency)}</b></td><td data-label="الربح"><b class="${profitTone(profit)}">${fmt(profit,p.currency)}</b></td><td data-label="المورد"><div class="item-supplier">${esc(it.supplier||'—')}</div></td><td data-label="ملاحظات"><div class="item-note">${esc(it.notes||'—')}</div></td><td data-label="إجراءات"><button class="btn ghost small" data-action="edit-item" data-section-id="${s.id}" data-category-id="${cat.id}" data-item-id="${it.id}">تعديل</button> <button class="btn danger small" data-action="delete-item" data-section-id="${s.id}" data-category-id="${cat.id}" data-item-id="${it.id}">حذف</button></td></tr>`;
+        return `<tr data-item-search="${esc(searchText)}"><td data-label="الصنف"><div class="item-name">${it.image?`<img class="thumb" src="${it.image}" alt="">`:''}<span>${esc(it.name)}</span></div></td><td data-label="الكمية">${fmtNum(qty)} ${esc(it.unit||'')}</td><td data-label="سعر الشراء">${fmt(it.unitPrice,p.currency)}</td><td data-label="إجمالي الشراء"><b>${fmt(purchase,p.currency)}</b></td><td data-label="المورد"><div class="item-supplier">${esc(it.supplier||'—')}</div></td><td data-label="ملاحظات"><div class="item-note">${esc(it.notes||'—')}</div></td><td data-label="إجراءات"><button class="btn ghost small" data-action="edit-item" data-section-id="${s.id}" data-category-id="${cat.id}" data-item-id="${it.id}">تعديل</button> <button class="btn danger small" data-action="delete-item" data-section-id="${s.id}" data-category-id="${cat.id}" data-item-id="${it.id}">حذف</button></td></tr>`;
       }).join('');
-      table=rows?`<div class="items"><table class="item-table goods-table"><thead><tr><th>الصنف</th><th>الكمية</th><th>سعر الشراء</th><th>سعر البيع</th><th>إجمالي الشراء</th><th>إجمالي البيع</th><th>الربح</th><th>المورد</th><th>ملاحظات</th><th>إجراءات</th></tr></thead><tbody>${rows}</tbody></table></div>`:'<div class="category-empty">لسه مفيش أصناف في الفئة دي.</div>';
+      table=rows?`<div class="items"><table class="item-table goods-table"><thead><tr><th>الصنف</th><th>الكمية</th><th>سعر الشراء</th><th>إجمالي الشراء</th><th>المورد</th><th>ملاحظات</th><th>إجراءات</th></tr></thead><tbody>${rows}</tbody></table></div>`:'<div class="category-empty">لسه مفيش أصناف في الفئة دي.</div>';
     } else if(kind==='monthly_expenses'){
       rows=cat.items.map(it=>{
         const total=Math.max(0,n(it.qty))*Math.max(0,n(it.unitPrice)); const searchText=`${it.name} ${it.notes||''}`.toLowerCase();
@@ -324,7 +326,7 @@
       table=rows?`<div class="items"><table class="item-table"><thead><tr><th>العنصر</th><th>الكمية</th><th>سعر الوحدة</th><th>الإجمالي</th><th>التكلفة</th><th>الحالة</th><th>المورد / المكان</th><th>ملاحظات</th><th>إجراءات</th></tr></thead><tbody>${rows}</tbody></table></div>`:'<div class="category-empty">لسه مفيش عناصر في الفئة دي.</div>';
     }
     let totals='';
-    if(kind==='goods') totals=`${cat.items.length} أصناف • شراء <b>${fmt(cc.purchase,p.currency)}</b> • بيع <b>${fmt(cc.sales,p.currency)}</b> • ربح <b>${fmt(cc.profit,p.currency)}</b>`;
+    if(kind==='goods') totals=`${cat.items.length} أصناف • إجمالي تكلفة الشراء <b>${fmt(cc.purchase,p.currency)}</b>`;
     else if(kind==='monthly_expenses') totals=`${cat.items.length} بنود • إجمالي شهري <b>${fmt(cc.monthly,p.currency)}</b>`;
     else totals=`${cat.items.length} عناصر • تأسيس <b>${fmt(cc.startup,p.currency)}</b> • شهري <b>${fmt(cc.monthly,p.currency)}</b>`;
     return `<div class="category" data-category-search="${esc(catSearch)}"><div class="category-head"><div><h4>${esc(cat.name)}</h4>${cat.notes?`<div class="category-note">${esc(cat.notes)}</div>`:''}<div class="category-totals">${totals}</div></div><div class="category-actions"><button class="btn small" data-action="new-item" data-section-id="${s.id}" data-category-id="${cat.id}">+ ${kind==='goods'?'صنف':kind==='monthly_expenses'?'بند':'عنصر'}</button><button class="btn ghost small" data-action="edit-category" data-section-id="${s.id}" data-category-id="${cat.id}">تعديل</button><button class="btn danger small" data-action="delete-category" data-section-id="${s.id}" data-category-id="${cat.id}">حذف</button></div></div>${table}</div>`;
@@ -333,16 +335,17 @@
   function moneyOrDash(v,p){ return v===null || !Number.isFinite(Number(v)) ? '—' : fmt(v,p.currency); }
   function monthsOrDash(v){ return v===null || !Number.isFinite(Number(v)) ? '—' : `${fmtNum(v)} شهر`; }
   function profitTone(v){ return n(v)>0?'positive':n(v)<0?'negative':'neutral'; }
-  function renderSimpleProfit(p,c){
-    const x=calcSimpleProfit(p,c);
+  function renderBreakEven(p,c){
+    const x=calcBreakEven(p,c);
+    const breakEvenText=x.breakEvenSales===null?'حدد هامش الربح':fmt(x.breakEvenSales,p.currency);
     return `<section class="card simple-profit">
-      <div class="simple-profit-head"><div><span class="eyebrow">الربح المتوقع</span><h2>الحسبة ببساطة</h2></div></div>
+      <div class="simple-profit-head"><div><span class="eyebrow">نقطة التعادل</span><h2>محتاج مبيعات كام كل شهر؟</h2></div></div>
       <div class="simple-profit-grid">
-        <div class="simple-profit-card"><span>ربح البضاعة</span><strong>${fmt(x.profit,p.currency)}</strong><small>بيع ${fmt(x.sales,p.currency)} − شراء ${fmt(x.purchase,p.currency)}</small></div>
-        <div class="simple-profit-card"><span>المصاريف الشهرية</span><strong>${fmt(x.monthlyExpenses,p.currency)}</strong><small>بتتجمع تلقائيًا من بند المصاريف الشهرية</small></div>
-        <div class="simple-profit-card final ${profitTone(x.netProfit)}"><span>صافي الربح المتوقع</span><strong>${fmt(x.netProfit,p.currency)}</strong><small>ربح البضاعة − المصاريف الشهرية</small></div>
+        <div class="simple-profit-card"><span>المصروفات الشهرية</span><strong>${fmt(x.monthlyExpenses,p.currency)}</strong><small>بتتجمع تلقائيًا من قسم المصروفات الشهرية</small></div>
+        <div class="simple-profit-card"><span>متوسط هامش مجمل الربح</span><strong>${fmtNum(x.grossMarginPct)}%</strong><small>عدّله من إعدادات الدراسة</small></div>
+        <div class="simple-profit-card final"><span>مبيعات نقطة التعادل / شهر</span><strong>${breakEvenText}</strong><small>${x.breakEvenSales===null?'أدخل نسبة هامش مجمل الربح أولًا':'عند هذا المستوى تغطي المصروفات الشهرية بدون ربح أو خسارة'}</small></div>
       </div>
-      <div class="simple-profit-note">الحسبة مبنية على كميات البضاعة اللي إنت مدخلها.</div>
+      <div class="simple-profit-note">مثال: هامش 15% يعني أن كل 100 جنيه مبيعات يساهم منها 15 جنيه في تغطية المصروفات الشهرية.</div>
     </section>`;
   }
 
@@ -362,7 +365,7 @@
 
   function renderSummary(p,c){
     if(!p.sections.length) return '';
-    const rows=p.sections.map(s=>{const x=calcSection(s);return `<div class="break-row"><span><b>${esc(s.name)}</b></span><small>تأسيس ${fmt(x.startup,p.currency)} • شهري ${fmt(x.monthly,p.currency)}</small><b>${fmt(x.firstYear,p.currency)}</b></div>`}).join('');
+    const rows=p.sections.map(s=>{const x=calcSection(s);return `<div class="break-row"><span><b>${esc(s.name)}</b></span><small>شهري ${fmt(x.monthly,p.currency)}</small><b>تأسيس ${fmt(x.startup,p.currency)}</b></div>`}).join('');
     return `<div class="summary-wrap">
       <section class="card summary"><h3>ملخص الأقسام</h3><div class="breakdown">${rows}</div></section>
       <section class="card capital-formula"><h3>حسبة رأس المال</h3>
@@ -390,6 +393,7 @@
       <div class="field"><label>العملة</label><input name="currency" maxlength="12" value="${esc(p?.currency||'ج')}"></div>
       <div class="field"><label>احتياطي تشغيل — عدد الشهور</label><input name="reserveMonths" type="number" min="0" max="24" step="1" value="${p?.reserveMonths ?? 3}"><div class="hint">سيولة إضافية تساوي المصروف الشهري × عدد الشهور. اجعلها 0 لو مش عايز تحسبها.</div></div>
       <div class="field"><label>احتياطي طوارئ %</label><input name="contingencyPct" type="number" min="0" max="100" step="0.5" value="${p?.contingencyPct ?? 10}"><div class="hint">نسبة فوق التأسيس + احتياطي التشغيل لمواجهة فرق الأسعار والمفاجآت.</div></div>
+      <div class="field"><label>متوسط هامش مجمل الربح %</label><input name="grossMarginPct" type="number" min="0" max="100" step="0.1" value="${p?.grossMarginPct ?? 0}"><div class="hint">استخدم نسبة تقديرية للمشروع كله. مثال: 15 يعني أن كل 100 جنيه مبيعات يساهم منها 15 جنيه في تغطية المصروفات.</div></div>
       <div class="field full"><label>وصف / ملاحظات عامة</label><textarea name="description" placeholder="فكرة المشروع، الجمهور، أي ملاحظات مهمة…">${esc(p?.description||'')}</textarea></div>
       <div class="inline-summary">الرقم الرئيسي في الدراسة هيكون: <b>تكاليف التأسيس + احتياطي التشغيل + احتياطي الطوارئ</b>.</div>
     </div></form>`);
@@ -439,7 +443,6 @@
         <div class="field"><label>الكمية *</label><input name="qty" required min="0" step="any" type="number" value="${it?.qty ?? 1}"></div>
         <div class="field"><label>الوحدة</label><input name="unit" list="units" placeholder="قطعة / كرتونة / كيلو…" value="${esc(it?.unit||'قطعة')}"><datalist id="units"><option>قطعة</option><option>كرتونة</option><option>علبة</option><option>باكت</option><option>كيلو</option><option>جرام</option><option>لتر</option><option>وحدة</option></datalist></div>
         <div class="field"><label>سعر الشراء للوحدة *</label><input name="unitPrice" required min="0" step="any" type="number" value="${it?.unitPrice ?? 0}"></div>
-        <div class="field"><label>سعر البيع للوحدة *</label><input name="salePrice" required min="0" step="any" type="number" value="${it?.salePrice ?? it?.unitPrice ?? 0}"></div>
         <div class="field full"><label>المورد / مكان الشراء</label><input name="supplier" maxlength="160" value="${esc(it?.supplier||'')}"></div>
         <div class="field full"><label>ملاحظات</label><textarea name="notes">${esc(it?.notes||'')}</textarea></div>
         <div class="field full"><label>صورة الصنف (اختياري)</label><input name="imageFile" type="file" accept="image/*">${it?.image?`<img class="preview-img" style="display:block" src="${it.image}">`:''}</div>
@@ -461,7 +464,7 @@
       <div class="field"><label>الكمية *</label><input name="qty" required min="0" step="any" type="number" value="${it?.qty ?? 1}"></div>
       <div class="field"><label>الوحدة</label><input name="unit" list="units" placeholder="قطعة / كرتونة / متر…" value="${esc(it?.unit||'قطعة')}"><datalist id="units"><option>قطعة</option><option>كرتونة</option><option>علبة</option><option>باكت</option><option>كيلو</option><option>جرام</option><option>لتر</option><option>متر</option><option>متر مربع</option><option>شهر</option><option>وحدة</option></datalist></div>
       <div class="field"><label>سعر الوحدة *</label><input name="unitPrice" required min="0" step="any" type="number" value="${it?.unitPrice ?? 0}"></div>
-      <div class="field"><label>نوع التكلفة</label><select name="period"><option value="startup" ${it?.period==='startup'||!it?'selected':''}>مرة واحدة / تأسيس</option><option value="monthly" ${it?.period==='monthly'?'selected':''}>شهري</option><option value="annual" ${it?.period==='annual'?'selected':''}>سنوي</option></select></div>
+      <div class="field"><label>نوع التكلفة</label><select name="period"><option value="startup" ${it?.period!=='monthly'?'selected':''}>مرة واحدة / تأسيس</option><option value="monthly" ${it?.period==='monthly'?'selected':''}>شهري</option></select></div>
       <div class="field"><label>حالة الاختيار</label><select name="status"><option value="confirmed" ${it?.status==='confirmed'||!it?'selected':''}>مؤكد</option><option value="research" ${it?.status==='research'?'selected':''}>قيد المقارنة</option><option value="replace" ${it?.status==='replace'?'selected':''}>محتاج بديل</option></select></div>
       <div class="field full"><label>المورد / مكان الشراء</label><input name="supplier" maxlength="160" value="${esc(it?.supplier||'')}"></div>
       <div class="field full"><label>ملاحظات العنصر</label><textarea name="notes">${esc(it?.notes||'')}</textarea></div>
@@ -543,8 +546,8 @@
     try{
       if(type==='project'){
         const id=f.dataset.id; let p=state.projects.find(x=>x.id===id);
-        if(!p){p={id:uid('prj'),name:'',description:'',location:'',area:'',currency:'ج',images:[],sections:[{id:uid('sec'),name:'البضاعة',notes:'',kind:'goods',categories:[]},{id:uid('sec'),name:'المصاريف الشهرية',notes:'',kind:'monthly_expenses',categories:[]}],revenues:[],reserveMonths:3,contingencyPct:10,weakScenarioPct:70,strongScenarioPct:130,createdAt:now(),updatedAt:now()};state.projects.unshift(p);currentProjectId=p.id;}
-        p.name=String(fd.get('name')).trim();p.location=String(fd.get('location')).trim();p.area=String(fd.get('area')).trim();p.currency=String(fd.get('currency')).trim()||'ج';p.reserveMonths=clamp(fd.get('reserveMonths'),0,24);p.contingencyPct=clamp(fd.get('contingencyPct'),0,100);p.description=String(fd.get('description')).trim();ensureCoreSections(p);touchProject(p);
+        if(!p){p={id:uid('prj'),name:'',description:'',location:'',area:'',currency:'ج',images:[],sections:[{id:uid('sec'),name:'البضاعة',notes:'',kind:'goods',categories:[]},{id:uid('sec'),name:'المصاريف الشهرية',notes:'',kind:'monthly_expenses',categories:[]}],revenues:[],reserveMonths:3,contingencyPct:10,grossMarginPct:0,weakScenarioPct:70,strongScenarioPct:130,createdAt:now(),updatedAt:now()};state.projects.unshift(p);currentProjectId=p.id;}
+        p.name=String(fd.get('name')).trim();p.location=String(fd.get('location')).trim();p.area=String(fd.get('area')).trim();p.currency=String(fd.get('currency')).trim()||'ج';p.reserveMonths=clamp(fd.get('reserveMonths'),0,24);p.contingencyPct=clamp(fd.get('contingencyPct'),0,100);p.grossMarginPct=clamp(fd.get('grossMarginPct'),0,100);p.description=String(fd.get('description')).trim();ensureCoreSections(p);touchProject(p);
       }
       if(type==='revenue'){
         const p=getProject();let r=getRevenue(p,f.dataset.id);if(!r){r={id:uid('rev')};p.revenues=p.revenues||[];p.revenues.push(r)}
@@ -558,7 +561,7 @@
       }
       if(type==='item'){
         const p=getProject(),s=getSection(p,f.dataset.sectionId),cat=getCategory(s,f.dataset.categoryId);let it=getItem(cat,f.dataset.id);if(!it){it={id:uid('item'),image:null};cat.items.push(it)}
-        it.name=String(fd.get('name')).trim();it.qty=Math.max(0,n(fd.get('qty')));it.unit=String(fd.get('unit')).trim();it.unitPrice=Math.max(0,n(fd.get('unitPrice')));if(s.kind==='goods'){it.salePrice=Math.max(0,n(fd.get('salePrice')));it.period='startup';}else if(s.kind==='monthly_expenses'){it.period='monthly';}else{it.period=String(fd.get('period')||it.period||'startup');}it.status=String(fd.get('status')||it.status||'confirmed');it.supplier=String(fd.get('supplier')||it.supplier||'').trim();it.notes=String(fd.get('notes')||'').trim();it.updatedAt=now();const file=f.querySelector('[name="imageFile"]')?.files?.[0];if(file) it.image=await compressImage(file,900,.8);touchProject(p);
+        it.name=String(fd.get('name')).trim();it.qty=Math.max(0,n(fd.get('qty')));it.unit=String(fd.get('unit')).trim();it.unitPrice=Math.max(0,n(fd.get('unitPrice')));if(s.kind==='goods'){if(fd.has('salePrice')) it.salePrice=Math.max(0,n(fd.get('salePrice')));it.period='startup';}else if(s.kind==='monthly_expenses'){it.period='monthly';}else{it.period=String(fd.get('period')||it.period||'startup');}it.status=String(fd.get('status')||it.status||'confirmed');it.supplier=String(fd.get('supplier')||it.supplier||'').trim();it.notes=String(fd.get('notes')||'').trim();it.updatedAt=now();const file=f.querySelector('[name="imageFile"]')?.files?.[0];if(file) it.image=await compressImage(file,900,.8);touchProject(p);
       }
       closeModal(); await commit('تم الحفظ');
     }catch(err){console.error(err);alert(err.message||'حصل خطأ أثناء الحفظ')}
@@ -577,7 +580,7 @@
     const file=backupFile.files?.[0];if(!file)return;try{const parsed=JSON.parse(await file.text());if(!parsed||!Array.isArray(parsed.projects)) throw new Error('ملف غير صالح');if(!confirm('استرجاع النسخة سيستبدل البيانات الحالية على الجهاز. متابعة؟'))return;state=normalizeState(parsed);currentProjectId=null;await commit('تم استرجاع النسخة')}catch(err){alert('تعذر استرجاع الملف: '+(err.message||''))}finally{backupFile.value=''}
   });
 
-  window.__feasibilityTest = { calcItems, calcCategory, calcSection, calcProject, calcGoods, calcSimpleProfit, calcRevenueSource, calcRevenues, calcScenario, normalizeState, state:()=>state };
+  window.__feasibilityTest = { calcItems, calcCategory, calcSection, calcProject, calcGoods, calcBreakEven, calcRevenueSource, calcRevenues, calcScenario, normalizeState, state:()=>state };
 
   if('serviceWorker' in navigator) window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(console.warn));
   load().catch(err=>{console.error(err);main.innerHTML='<div class="card empty"><strong>تعذر فتح البيانات</strong>جرّب إعادة تحميل الصفحة.</div>'});
